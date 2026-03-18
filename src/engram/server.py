@@ -98,6 +98,24 @@ memories surface automatically during recall.
 After using recall results, call memory_feedback to mark them helpful or not. \
 This trains the graph to surface better results over time.
 
+## Correcting Wrong Memories
+
+When you discover a stored memory is wrong or outdated, use memory_correct:
+
+memory_correct(old_memory_id="<id>", new_content="The corrected info", \
+project="<project>")
+
+This stores the correction, links it to the old memory via a "supersedes" \
+relationship, and demotes the old memory so it gets pruned over time. \
+The old memory is NOT deleted -- the history is preserved.
+
+If a recalled memory has a WARNING field saying "THIS MEMORY HAS BEEN \
+SUPERSEDED", always prefer the newer version referenced in "superseded_by".
+
+Correct proactively: if you discover during your work that a stored memory \
+is wrong (file path changed, dependency updated, approach abandoned), \
+fix it immediately without being asked.
+
 ## Maintenance
 
 Run memory_consolidate periodically to deduplicate, decay unused edges, and \
