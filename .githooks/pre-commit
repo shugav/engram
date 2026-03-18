@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# pre-commit hook: rejects commits containing sensitive patterns.
+#
+# Generic patterns (always active):
+#   - API keys and tokens (sk-..., ghp_..., github_pat_...)
+#
+# Custom patterns (your personal blocklist):
+#   Add patterns to .githooks/patterns.local (one regex per line).
+#   That file is gitignored -- your hostnames and paths stay private.
+#
+# Install: git config core.hooksPath .githooks
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+GENERIC='(sk-[a-zA-Z0-9]{10,}|ghp_[a-zA-Z0-9]{20,}|github_pat_[a-zA-Z0-9])'
+
+LOCAL_FILE="$REPO_ROOT/.githooks/patterns.local"
+LOCAL_PATTERNS=""
+if [ -f "$LOCAL_FILE" ]; then
+    LOCAL_PATTERNS=$(grep -v '^#' "$LOCAL_FILE" | grep -v '^\s*$' | tr '\n' '|' | sed 's/|$//')
+fi
+
+if [ -n "$LOCAL_PATTERNS" ]; then
+    FULL_PATTERN="($GENERIC|$LOCAL_PATTERNS)"
+else
+    FULL_PATTERN="$GENERIC"
+fi
+
+STAGED_DIFF=$(git diff --cached --diff-filter=ACMR -- . ":(exclude).githooks" ":(exclude).cursor/rules" 2>/dev/null || true)
+
+if [ -z "$STAGED_DIFF" ]; then
+    exit 0
+fi
+
+MATCHES=$(echo "$STAGED_DIFF" | grep -iE "$FULL_PATTERN" 2>/dev/null || true)
+
+if [ -n "$MATCHES" ]; then
+    echo ""
+    echo "COMMIT BLOCKED: sensitive content detected in staged changes."
+    echo ""
+    echo "$MATCHES" | head -20
+    echo ""
+    echo "Fix these lines before committing."
+    echo "To bypass (emergency only): git commit --no-verify"
+    exit 1
+fi

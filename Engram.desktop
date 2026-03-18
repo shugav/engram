@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Engram
+Comment=Open Engram on a remote host via Cursor Remote SSH
+Exec=cursor --remote ssh-remote+your-server /path/to/engram
+Type=Application
+Terminal=false
+Icon=utilities-terminal
+Categories=Development;

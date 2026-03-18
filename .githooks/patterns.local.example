@@ -1,0 +1,9 @@
+# Personal blocklist -- one regex per line. Lines starting with # are ignored.
+# Copy this file to patterns.local and add your own hostnames, paths, and
+# service names. patterns.local is gitignored so nothing here goes public.
+#
+# Examples:
+# my-server-hostname
+# /home/myuser/
+# my-internal-service
+# 192\.168\.1\.

@@ -1,0 +1,14 @@
+# Purpose: Route contributors to the right support docs and templates.
+# Role: Improves onboarding, reduces confusion, and keeps issue quality high.
+
+blank_issues_enabled: true
+contact_links:
+  - name: Contribution Guide
+    url: https://github.com/shugav/engram/blob/main/CONTRIBUTING.md
+    about: Read the contribution workflow and expectations.
+  - name: Support and Questions
+    url: https://github.com/shugav/engram/blob/main/SUPPORT.md
+    about: Not sure where to start? Use this guide.
+  - name: Security Policy
+    url: https://github.com/shugav/engram/blob/main/SECURITY.md
+    about: Report security concerns using the responsible disclosure path.

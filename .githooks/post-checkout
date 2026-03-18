@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# post-checkout hook: re-applies skip-worktree flags on template files.
+#
+# These files have generic placeholders in git but personal values locally.
+# Without this hook, flags can be lost after branch switches or stash ops.
+#
+# Install: git config core.hooksPath .githooks
+
+SKIP_FILES=(
+    "engram-server.service"
+    "Engram.desktop"
+    "Engram.bat"
+    "setup-remote.sh"
+)
+
+for f in "${SKIP_FILES[@]}"; do
+    if git ls-files --error-unmatch "$f" &>/dev/null 2>&1; then
+        git update-index --skip-worktree "$f" 2>/dev/null || true
+    fi
+done

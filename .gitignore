@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+
+# Environment
+.env
+
+# Personal pre-commit patterns (contains hostnames, paths)
+.githooks/patterns.local
+
+# Engram databases
+*.db
+*.db-wal
+*.db-shm
+
+# IDE
+.idea/
+.vscode/
+*.code-workspace
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+.cursor/

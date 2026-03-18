@@ -1,0 +1,6 @@
+mcp>=1.0.0
+openai>=1.30.0
+numpy>=1.26.0
+pydantic>=2.5.0
+uvicorn>=0.30.0
+starlette>=0.38.0

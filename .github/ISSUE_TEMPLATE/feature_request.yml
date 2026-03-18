@@ -1,0 +1,61 @@
+name: Feature Request
+description: Suggest an idea for this project
+title: "[FEATURE] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for your interest in improving Engram.
+        Clear use cases help us prioritize and design better.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight checklist
+      options:
+        - label: I searched existing issues and feature requests first.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Is your feature request related to a problem? Please describe.
+      description: A clear and concise description of what the problem is. Ex. I'm always frustrated when [...]
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Describe the solution you'd like
+      description: A clear and concise description of what you want to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Describe alternatives you've considered
+      description: A clear and concise description of any alternative solutions or features you've considered.
+    validations:
+      required: false
+  - type: textarea
+    id: scope
+    attributes:
+      label: Proposed scope
+      description: What is in-scope and out-of-scope for this request?
+      placeholder: |
+        In scope:
+        - ...
+        
+        Out of scope:
+        - ...
+    validations:
+      required: false
+  - type: dropdown
+    id: contribution
+    attributes:
+      label: Are you willing to help implement this?
+      options:
+        - Yes, I can open a PR
+        - Maybe, with guidance
+        - No, just suggesting
+    validations:
+      required: true
