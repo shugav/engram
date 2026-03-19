@@ -26,18 +26,20 @@ class RelationType(str, Enum):
 
 
 class Importance(int, Enum):
-    """Lower number = more important. Mirrors Nocturne Memory's priority system."""
-    CRITICAL = 0
-    HIGH = 1
+    """v3 scale: higher = more important (4 = critical, 0 = trivial)."""
+
+    TRIVIAL = 0
+    LOW = 1
     MEDIUM = 2
-    LOW = 3
-    TRIVIAL = 4
+    HIGH = 3
+    CRITICAL = 4
 
 
 MAX_CONTENT_LENGTH = 50_000
 
+
 class Memory(BaseModel):
-    id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     content: str = Field(..., max_length=MAX_CONTENT_LENGTH)
     memory_type: MemoryType = MemoryType.CONTEXT
     project: str = "default"
@@ -50,7 +52,7 @@ class Memory(BaseModel):
 
 
 class Chunk(BaseModel):
-    id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     memory_id: str
     chunk_text: str
     chunk_index: int
@@ -59,7 +61,7 @@ class Chunk(BaseModel):
 
 
 class Relationship(BaseModel):
-    id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     source_id: str
     target_id: str
     rel_type: RelationType = RelationType.RELATES_TO

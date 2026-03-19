@@ -1,3 +1,5 @@
+"""Three-layer memory search (BM25 + pgvector + graph) for Engram v3."""
+
 from __future__ import annotations
 
 import logging
@@ -6,12 +8,20 @@ from datetime import datetime, timezone
 
 from .chunker import chunk_hash, chunk_text, is_duplicate
 from .db import MemoryDB
-from .embeddings import EmbeddingProvider, NullEmbedder, cosine_similarity, from_blob, to_blob
+from .embeddings import (
+    EMBEDDING_DIM,
+    EmbeddingProvider,
+    NullEmbedder,
+    format_vector_literal,
+    to_blob,
+)
 from .errors import EmbeddingConfigMismatchError
 from .types import (
     Chunk,
     ConnectedMemory,
     Memory,
+    Relationship,
+    RelationType,
     SearchResult,
 )
 
@@ -21,6 +31,11 @@ WEIGHT_VECTOR = 0.45
 WEIGHT_BM25 = 0.25
 WEIGHT_RECENCY = 0.15
 WEIGHT_GRAPH = 0.15
+
+# When vectors are disabled, redistribute former vector mass to BM25 + recency (+ graph).
+WEIGHT_BM25_NULL = 0.50
+WEIGHT_RECENCY_NULL = 0.30
+WEIGHT_GRAPH_NULL = 0.20
 
 DECAY_RATE = 0.01  # per hour
 
@@ -33,54 +48,46 @@ class SearchEngine:
 
     @property
     def has_vectors(self) -> bool:
-        """Whether this engine produces vector embeddings."""
         return not self._is_null
 
-    def _check_embedder_metadata(self) -> None:
-        """Enforce that the current embedder matches the project's stored config.
+    def _weights(self) -> tuple[float, float, float, float]:
+        if self._is_null:
+            return 0.0, WEIGHT_BM25_NULL, WEIGHT_RECENCY_NULL, WEIGHT_GRAPH_NULL
+        return WEIGHT_VECTOR, WEIGHT_BM25, WEIGHT_RECENCY, WEIGHT_GRAPH
 
-        On first embed, stores the embedder name and dimensions.
-        On subsequent embeds, raises EmbeddingConfigMismatchError on mismatch.
-        """
+    async def _check_embedder_metadata(self) -> None:
         if self._is_null:
             return
 
-        stored_name = self.db.get_meta("embedder_name")
-        stored_dims = self.db.get_meta("embedder_dimensions")
+        stored_name = await self.db.get_meta("embedder_name")
+        stored_dims = await self.db.get_meta("embedder_dimensions")
 
         if stored_name is None:
-            self.db.set_meta("embedder_name", self.embedder.name)
-            self.db.set_meta("embedder_dimensions", str(self.embedder.dimensions))
-            self.db.set_meta("embedder_version", getattr(self.embedder, "version", "unknown"))
+            await self.db.set_meta("embedder_name", self.embedder.name)
+            await self.db.set_meta("embedder_dimensions", str(EMBEDDING_DIM))
+            await self.db.set_meta("embedder_version", getattr(self.embedder, "version", "unknown"))
             return
 
-        if stored_name != self.embedder.name or int(stored_dims or 0) != self.embedder.dimensions:
+        if stored_name != self.embedder.name or int(stored_dims or 0) != EMBEDDING_DIM:
             raise EmbeddingConfigMismatchError(
                 stored_name=stored_name,
                 stored_dims=int(stored_dims or 0),
                 current_name=self.embedder.name,
-                current_dims=self.embedder.dimensions,
+                current_dims=EMBEDDING_DIM,
             )
 
-    def store(self, memory: Memory) -> Memory:
-        """Store a memory: chunk it, embed it (if provider available), index it."""
-        self._check_embedder_metadata()
-
-        memory = self.db.store_memory(memory)
-
+    async def _prepare_new_chunks(self, memory: Memory) -> tuple[list[Chunk], list[str]]:
+        """Build deduped chunk rows and parallel text list for embedding."""
         chunks = chunk_text(memory.content)
-        existing_texts = self.db.get_all_chunk_texts(limit=5000)
-
+        existing_texts = await self.db.get_all_chunk_texts(limit=5000)
         texts_to_embed: list[str] = []
         chunk_objects: list[Chunk] = []
-
         for i, text in enumerate(chunks):
             h = chunk_hash(text)
-            if self.db.chunk_hash_exists(h):
+            if await self.db.chunk_hash_exists(h):
                 continue
             if is_duplicate(text, existing_texts):
                 continue
-
             chunk_objects.append(
                 Chunk(
                     memory_id=memory.id,
@@ -91,18 +98,75 @@ class SearchEngine:
             )
             texts_to_embed.append(text)
             existing_texts.append(text)
+        return chunk_objects, texts_to_embed
 
-        if texts_to_embed and self.has_vectors:
-            embeddings = self.embedder.embed_batch(texts_to_embed)
-            for chunk_obj, emb in zip(chunk_objects, embeddings):
-                chunk_obj.embedding = to_blob(emb)
+    async def store(self, memory: Memory) -> Memory:
+        await self._check_embedder_metadata()
+        chunk_objects, texts_to_embed = await self._prepare_new_chunks(memory)
 
-        if chunk_objects:
-            self.db.store_chunks(chunk_objects)
+        async with self.db.pool.connection() as conn:
+            async with conn.transaction():
+                memory = await self.db.store_memory(memory, conn=conn)
+
+                if texts_to_embed and self.has_vectors:
+                    try:
+                        embeddings = await self.embedder.embed_batch(texts_to_embed)
+                    except Exception:
+                        logger.exception("Embedding failed; rolling back memory store")
+                        raise
+                    for chunk_obj, emb in zip(chunk_objects, embeddings):
+                        chunk_obj.embedding = to_blob(emb)
+
+                if chunk_objects:
+                    await self.db.store_chunks(chunk_objects, conn=conn)
 
         return memory
 
-    def recall(
+    async def correct_memory(
+        self,
+        old_memory_id: str,
+        new_memory: Memory,
+    ) -> tuple[Memory, Memory]:
+        """Store correction, supersede link, and demote old memory (single transaction)."""
+        await self._check_embedder_metadata()
+        old = await self.db.get_memory(old_memory_id)
+        if not old:
+            raise ValueError(f"Memory '{old_memory_id}' not found.")
+
+        chunk_objects, texts_to_embed = await self._prepare_new_chunks(new_memory)
+
+        async with self.db.pool.connection() as conn:
+            async with conn.transaction():
+                stored_new = await self.db.store_memory(new_memory, conn=conn)
+
+                if texts_to_embed and self.has_vectors:
+                    try:
+                        embeddings = await self.embedder.embed_batch(texts_to_embed)
+                    except Exception:
+                        logger.exception("Embedding failed; rolling back correction")
+                        raise
+                    for chunk_obj, emb in zip(chunk_objects, embeddings):
+                        chunk_obj.memory_id = stored_new.id
+                        chunk_obj.embedding = to_blob(emb)
+                else:
+                    for chunk_obj in chunk_objects:
+                        chunk_obj.memory_id = stored_new.id
+
+                if chunk_objects:
+                    await self.db.store_chunks(chunk_objects, conn=conn)
+
+                rel = Relationship(
+                    source_id=stored_new.id,
+                    target_id=old_memory_id,
+                    rel_type=RelationType.SUPERSEDES,
+                    strength=1.0,
+                )
+                await self.db.store_relationship(rel, conn=conn)
+                await self.db.update_memory(old_memory_id, importance=0, conn=conn)
+
+        return old, stored_new
+
+    async def recall(
         self,
         query: str,
         top_k: int = 10,
@@ -111,12 +175,10 @@ class SearchEngine:
         min_importance: int | None = None,
         graph_hops: int = 1,
     ) -> list[SearchResult]:
-        """Three-layer recall: BM25 + vector + recency, then graph expansion."""
-
+        w_vec, w_bm25, w_rec, w_graph = self._weights()
         candidates: dict[str, _Candidate] = {}
 
-        # Layer 1: FTS5 / BM25
-        fts_results = self.db.fts_search(query, limit=top_k * 2)
+        fts_results = await self.db.fts_search(query, limit=top_k * 2)
         if fts_results:
             max_bm25 = max(score for _, score in fts_results) or 1.0
             for mem, score in fts_results:
@@ -125,29 +187,15 @@ class SearchEngine:
                 cand.bm25_score = norm_score
                 cand.matched_chunk = mem.content[:200]
 
-        # Layer 2: Vector / Semantic (skipped for NullEmbedder)
         if self.has_vectors:
-            query_vec = self.embedder.embed(query)
-            all_chunks = self.db.get_all_chunks_with_embeddings()
-
-            chunk_scores: list[tuple[Chunk, float]] = []
-            for chunk in all_chunks:
-                if chunk.embedding is None:
-                    continue
-                chunk_vec = from_blob(chunk.embedding)
-                if len(chunk_vec) == 0:
-                    continue
-                sim = cosine_similarity(query_vec, chunk_vec)
-                chunk_scores.append((chunk, sim))
-
-            chunk_scores.sort(key=lambda x: x[1], reverse=True)
-            top_chunks = chunk_scores[: top_k * 2]
-
-            if top_chunks:
-                max_vec = top_chunks[0][1] if top_chunks[0][1] > 0 else 1.0
-                for chunk, sim in top_chunks:
-                    norm_score = sim / max_vec if max_vec > 0 else 0
-                    mem = self.db.get_memory(chunk.memory_id)
+            query_vec = await self.embedder.embed(query)
+            qv = format_vector_literal(query_vec)
+            nearest = await self.db.nearest_chunks_by_embedding(qv, limit=top_k * 2)
+            if nearest:
+                max_vec = max(sim for _, sim in nearest) or 1.0
+                for chunk, sim in nearest:
+                    norm_score = sim / max_vec if max_vec > 0 else 0.0
+                    mem = await self.db.get_memory(chunk.memory_id)
                     if not mem:
                         continue
                     cand = candidates.setdefault(mem.id, _Candidate(memory=mem))
@@ -155,38 +203,33 @@ class SearchEngine:
                         cand.vector_score = norm_score
                         cand.matched_chunk = chunk.chunk_text[:200]
 
-        # Score each candidate
         now = datetime.now(timezone.utc)
         scored: list[SearchResult] = []
 
         for cand in candidates.values():
             mem = cand.memory
 
-            # Apply filters
             if memory_type and mem.memory_type.value != memory_type:
                 continue
-            if min_importance is not None and mem.importance > min_importance:
+            if min_importance is not None and mem.importance < min_importance:
                 continue
             if tags and not (set(tags) & set(mem.tags)):
                 continue
 
-            # Layer 3: Recency decay
             hours = max((now - mem.last_accessed).total_seconds() / 3600, 0.01)
             recency_score = math.exp(-DECAY_RATE * hours)
 
-            # Layer 4: Graph connectivity boost (Cognee-inspired)
-            conn_count = self.db.get_connection_count(mem.id)
+            conn_count = await self.db.get_connection_count(mem.id)
             graph_score = min(1.0, conn_count / 5.0)
 
             composite = (
-                WEIGHT_VECTOR * cand.vector_score
-                + WEIGHT_BM25 * cand.bm25_score
-                + WEIGHT_RECENCY * recency_score
-                + WEIGHT_GRAPH * graph_score
+                w_vec * cand.vector_score
+                + w_bm25 * cand.bm25_score
+                + w_rec * recency_score
+                + w_graph * graph_score
             )
 
-            # Importance multiplier: importance 0 => 2x, importance 4 => 0.6x
-            importance_mult = 2.0 - (mem.importance * 0.35)
+            importance_mult = 1.0 + (mem.importance * 0.125)
             final_score = composite * importance_mult
 
             scored.append(
@@ -207,10 +250,9 @@ class SearchEngine:
         scored.sort(key=lambda r: r.score, reverse=True)
         top_results = scored[:top_k]
 
-        # Graph expansion: attach connected memories
         for result in top_results:
-            self.db.touch_memory(result.memory.id)
-            connected_raw = self.db.get_connected(result.memory.id, max_hops=graph_hops)
+            await self.db.touch_memory(result.memory.id)
+            connected_raw = await self.db.get_connected(result.memory.id, max_hops=graph_hops)
             result.connected = [
                 ConnectedMemory(
                     memory=mem,
@@ -223,25 +265,19 @@ class SearchEngine:
 
         return top_results
 
-    def feedback(self, memory_ids: list[str], helpful: bool) -> dict:
-        """Reinforce or weaken graph edges connected to recalled memories.
-
-        Inspired by Cognee's feedback loop: when results are helpful,
-        the graph paths that produced them get stronger. When unhelpful,
-        they get weaker. Over time, the graph self-optimizes.
-        """
+    async def feedback(self, memory_ids: list[str], helpful: bool) -> dict:
         total_affected = 0
         boost = 0.05 if helpful else -0.05
 
         for mid in memory_ids:
-            mem = self.db.get_memory(mid)
+            mem = await self.db.get_memory(mid)
             if not mem:
                 continue
             if helpful:
-                self.db.boost_edges_for_memory(mid, abs(boost))
-                self.db.touch_memory(mid)
+                await self.db.boost_edges_for_memory(mid, abs(boost))
+                await self.db.touch_memory(mid)
             else:
-                self.db.decay_edges_for_memory(mid, abs(boost))
+                await self.db.decay_edges_for_memory(mid, abs(boost))
             total_affected += 1
 
         return {
@@ -249,22 +285,10 @@ class SearchEngine:
             "memories_affected": total_affected,
         }
 
-    def memify(self) -> dict:
-        """Memory enhancement pass -- Cognee's memify concept.
-
-        Three stages:
-        1. Deduplicate chunks (by hash)
-        2. Decay all edge strengths and prune weak edges
-        3. Prune stale, never-accessed, low-importance memories
-        """
-        # Stage 1: Dedup chunks
-        deduped = self._dedup_chunks()
-
-        # Stage 2: Decay and prune edges
-        decayed, pruned_edges = self.db.decay_all_edges(decay_factor=0.02, min_strength=0.1)
-
-        # Stage 3: Prune stale memories (30 days, low importance, never accessed)
-        pruned_memories = self.db.prune_stale_memories(max_age_hours=720, max_importance=3)
+    async def memify(self) -> dict:
+        deduped = await self._dedup_chunks()
+        decayed, pruned_edges = await self.db.decay_all_edges(decay_factor=0.02, min_strength=0.1)
+        pruned_memories = await self.db.prune_stale_memories(max_age_hours=720, max_importance=1)
 
         return {
             "chunks_deduped": deduped,
@@ -273,19 +297,20 @@ class SearchEngine:
             "stale_memories_pruned": pruned_memories,
         }
 
-    def _dedup_chunks(self) -> int:
-        all_chunks = self.db.get_all_chunks_with_embeddings()
+    async def _dedup_chunks(self) -> int:
+        all_chunks = await self.db.get_all_chunks_with_embeddings()
         merged = 0
         seen_hashes: set[str] = set()
+        dup_ids: list[str] = []
         for chunk in all_chunks:
             h = chunk.chunk_hash
             if h in seen_hashes:
-                self.db._get_conn().execute("DELETE FROM chunks WHERE id = ?", (chunk.id,))
+                dup_ids.append(chunk.id)
                 merged += 1
             else:
                 seen_hashes.add(h)
-        if merged:
-            self.db._get_conn().commit()
+        if dup_ids:
+            await self.db.delete_chunk_ids(dup_ids)
         return merged
 
 
@@ -294,6 +319,6 @@ class _Candidate:
 
     def __init__(self, memory: Memory):
         self.memory = memory
-        self.bm25_score: float = 0.0
-        self.vector_score: float = 0.0
-        self.matched_chunk: str = ""
+        self.bm25_score = 0.0
+        self.vector_score = 0.0
+        self.matched_chunk = ""

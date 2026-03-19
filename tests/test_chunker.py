@@ -84,10 +84,7 @@ class TestIsDuplicate:
     def test_near_duplicate(self):
         # 13/15 unique words overlap -> Jaccard ~0.867, above the 0.85 threshold
         existing = ["alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi"]
-        candidate = (
-            "alpha beta gamma delta epsilon zeta eta theta"
-            " iota kappa lambda mu nu omicron"
-        )
+        candidate = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu omicron"
         assert is_duplicate(candidate, existing) is True
 
     def test_not_duplicate(self):

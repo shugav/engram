@@ -11,7 +11,7 @@
 
 Persistent three-layer memory for AI agents, exposed as an MCP server.
 
-Engram replaces flat handover notes with a real memory system backed by SQLite, semantic embeddings, and a typed knowledge graph. It is designed for agents that need context continuity across sessions, machines, and IDEs.
+**v3** uses **Postgres + pgvector** (async `psycopg`), `tsvector` keyword search, JSONB tags, and a typed knowledge graph. Docker Compose is the recommended install. Legacy SQLite data can be migrated with `scripts/migrate_sqlite_to_postgres.py`.
 
 ## Why Engram
 
@@ -38,33 +38,63 @@ Engram gives agents a durable "second brain" with:
 │  forget, status, feedback, consolidate          │
 └──────┬──────┬───────┬───────┬───────────────────┘
        │      │       │       │
-  ┌────▼──┐ ┌─▼────┐ ┌▼─────┐ ┌▼──────────┐
-  │Chunker│ │Embed │ │Search│ │   DB       │
-  │       │ │      │ │Engine│ │  SQLite    │
-  └───────┘ └──┬───┘ └──────┘ │  + FTS5    │
-          ┌────┼────┐         │            │
-          │ OpenAI  │         │            │
-          │ Ollama  │         │            │
-          │  None   │         │            │
-          └─────────┘         │            │
-                               │  + BLOBs   │
-                               │  + Graph   │
-                               └────────────┘
+  ┌────▼──┐ ┌─▼────┐ ┌▼─────┐ ┌▼──────────────┐
+  │Chunker│ │Embed │ │Search│ │ Postgres      │
+  │       │ │async │ │Engine│ │ + pgvector    │
+  └───────┘ └──┬───┘ └──────┘ │ + tsvector    │
+          ┌────┼────┐         │ + JSONB tags  │
+          │ OpenAI  │         │ + graph edges │
+          │ Ollama  │         └───────────────┘
+          │  None   │
+          └─────────┘
 ```
 
 ## Quick Start
 
-### 1) Install
+### 1) Docker (recommended)
+
+```bash
+git clone https://github.com/shugav/engram.git
+cd engram
+docker compose up --build
+```
+
+Set `OPENAI_API_KEY` / `ENGRAM_EMBEDDER` / `ENGRAM_API_KEY` in the environment or a `.env` file as needed. Postgres listens on `localhost:5432`, Engram SSE on `8788`.
+
+### 2) Local install (dev)
 
 ```bash
 git clone https://github.com/shugav/engram.git
 cd engram
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e ".[dev]"
+export DATABASE_URL="postgresql://user:pass@localhost:5432/engram"
 ```
 
-### 2) Configure embeddings (optional)
+Run a **pgvector** image (e.g. `pgvector/pgvector:pg16`), create a database, then start Engram. Migrations apply automatically on first pool open.
+
+### 3) SQLite → Postgres migration
+
+If you have legacy `~/.engram/*.db` files from v2:
+
+```bash
+export DATABASE_URL="postgresql://..."
+python scripts/migrate_sqlite_to_postgres.py
+```
+
+Optional: `ENGRAM_SQLITE_DIR=/path/to/dbs` to override the source directory.
+
+### Tests (developers)
+
+Requires Postgres with **pgvector** (same image as production). The suite resets the `public` schema once per session.
+
+```bash
+export ENGRAM_TEST_DATABASE_URL="postgresql://engram:engram@127.0.0.1:5432/engram_test"
+pytest
+```
+
+### 4) Configure embeddings (optional)
 
 Engram works in three embedding modes. It auto-detects the best available:
 
@@ -76,7 +106,7 @@ Engram works in three embedding modes. It auto-detects the best available:
 
 If no embedder is configured, engram auto-detects: Ollama (if running) -> OpenAI (if key set) -> BM25-only.
 
-### 3) Add Engram to Cursor (local stdio mode)
+### 5) Add Engram to Cursor (local stdio mode)
 
 Edit `~/.cursor/mcp.json`:
 
@@ -87,7 +117,8 @@ Edit `~/.cursor/mcp.json`:
       "command": "/path/to/engram/.venv/bin/python",
       "args": ["-m", "engram"],
       "env": {
-        "OPENAI_API_KEY": "sk-...",
+        "OPENAI_API_KEY": "<your-openai-key>",
+        "DATABASE_URL": "postgresql://engram:engram@localhost:5432/engram",
         "ENGRAM_PROJECT": "default",
         "PYTHONPATH": "/path/to/engram/src"
       }
@@ -98,7 +129,7 @@ Edit `~/.cursor/mcp.json`:
 
 Replace `/path/to/engram` with your absolute local path.
 
-### 4) Connect from other machines
+### 6) Connect from other machines
 
 #### Option A: SSH + stdio (simple and reliable)
 
@@ -175,34 +206,30 @@ You can also run `setup-remote.sh` to generate this config automatically.
 Search results are scored with this composite function:
 
 ```text
-composite = (vector * 0.45)
-          + (bm25 * 0.25)
-          + (recency * 0.15)
-          + (graph_connectivity * 0.15)
+# With embeddings (default)
+composite = (vector * 0.45) + (bm25 * 0.25) + (recency * 0.15) + (graph * 0.15)
 
-final_score = composite * importance_multiplier
+# Null / BM25-only embedder: vector weight is redistributed (e.g. bm25 0.50, recency 0.30, graph 0.20)
+
+final_score = composite * importance_multiplier   # mult ≈ 1.0 + importance * 0.125 (v3)
 ```
 
 Where:
 
 - **Vector**: semantic similarity against chunk embeddings
-- **BM25**: exact keyword relevance via FTS5
+- **BM25**: exact keyword relevance via Postgres `tsvector` / `ts_rank_cd`
 - **Recency**: exponential decay based on last access
 - **Graph connectivity**: boost for well-connected memories
-- **Importance multiplier**: `importance=0` gets strongest boost, `importance=4` the weakest
+- **Importance multiplier** (v3): higher `importance` (up to 4) increases the multiplier
 
-## Database Layout
+## Database layout (Postgres)
 
-Each project gets its own SQLite file at `~/.engram/{project}.db`.
+One database, many projects: the `project` column isolates tenants.
 
-- `memories` -- memory records and metadata
-- `memory_fts` -- FTS5 index
-- `chunks` -- chunked text, embedding BLOBs, and dedup hashes
-- `relationships` -- typed directed graph edges
-
-WAL mode is enabled for better concurrent read behavior. A `busy_timeout` of 5 seconds is set to handle brief lock contention from async interleaving.
-
-Each project also stores embedding metadata (`project_meta` table) to prevent mixing vectors from incompatible models.
+- `memories` -- content, JSONB tags, `tsvector` for search, importance, timestamps
+- `chunks` -- chunked text, `vector(1536)` embeddings (padded), dedup hashes
+- `relationships` -- typed directed graph edges (FK + `ON DELETE CASCADE`)
+- `project_meta` -- embedding provider metadata per `(project, key)`
 
 ## Architecture & Scaling
 
@@ -213,13 +240,12 @@ Each project also stores embedding metadata (`project_meta` table) to prevent mi
 | **stdio** (local) | Single agent per machine | Cursor spawns engram as a subprocess |
 | **SSE** (network) | Many agents, one server | Run one central server; agents connect as clients |
 
-For multiple concurrent agents, **use SSE mode**. The single server process serializes all writes through one SQLite connection, avoiding write conflicts entirely. All agents are clients -- they send MCP requests over HTTP, not direct DB writes.
+For multiple concurrent agents, **use SSE mode** with **one** Engram container (or process) and a shared Postgres. Clients talk MCP over HTTP; the server uses a connection pool.
 
 ### Known limitations
 
-- **SQLite single-writer**: One process can write at a time. SSE mode handles this by design (one server process). Running multiple server processes against the same DB will cause `SQLITE_BUSY` errors even with the 5-second busy timeout.
-- **Embedding model lock-in per project**: Once a project stores its first embedding, switching models requires re-indexing all chunks. A `memory_reindex` tool is planned for a future release.
-- **Future**: A `StorageBackend` interface is planned to support PostgreSQL for true multi-process concurrent writes.
+- **Embedding model lock-in per project**: After the first vector write, switching embedder name fails fast (`EmbeddingConfigMismatchError`). Re-embed or use a fresh project namespace.
+- **Fixed vector width**: Chunks use `vector(1536)`; shorter provider outputs are zero-padded.
 
 ## Compatible MCP Clients
 

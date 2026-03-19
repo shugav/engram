@@ -1,74 +1,82 @@
-"""Tests for engram.search.SearchEngine -- store/recall round trips and scoring."""
+"""Tests for SearchEngine (async)."""
 
 from __future__ import annotations
+
+import pytest
 
 from engram.types import Memory, MemoryType, Relationship, RelationType
 
 
+@pytest.mark.asyncio
 class TestStoreRecallRoundTrip:
-    def test_stored_memory_is_recallable(self, engine):
+    async def test_stored_memory_is_recallable(self, engine):
         mem = Memory(content="We chose PostgreSQL because it supports JSONB natively")
-        engine.store(mem)
+        await engine.store(mem)
 
-        results = engine.recall("PostgreSQL database choice")
+        results = await engine.recall("PostgreSQL database choice")
         assert len(results) >= 1
         assert "PostgreSQL" in results[0].memory.content
 
-    def test_recall_returns_best_match_first(self, engine):
-        engine.store(Memory(content="Authentication uses JWT with RS256 signing"))
-        engine.store(Memory(content="Database uses PostgreSQL 16 with pgvector"))
-        engine.store(Memory(content="Frontend built with React and TypeScript"))
+    async def test_recall_returns_best_match_first(self, engine):
+        await engine.store(Memory(content="Authentication uses JWT with RS256 signing"))
+        await engine.store(Memory(content="Database uses PostgreSQL 16 with pgvector"))
+        await engine.store(Memory(content="Frontend built with React and TypeScript"))
 
-        results = engine.recall("JWT authentication signing")
+        results = await engine.recall("JWT authentication signing")
         assert "JWT" in results[0].memory.content
 
-    def test_recall_empty_query(self, engine):
-        engine.store(Memory(content="Some stored content"))
-        results = engine.recall("")
-        # Should not crash; may return empty or all
+    async def test_recall_empty_query(self, engine):
+        await engine.store(Memory(content="Some stored content"))
+        results = await engine.recall("")
         assert isinstance(results, list)
 
-    def test_recall_no_results(self, engine):
-        results = engine.recall("quantum entanglement")
+    async def test_recall_no_results(self, engine):
+        results = await engine.recall("quantum entanglement")
         assert len(results) == 0
 
 
+@pytest.mark.asyncio
 class TestMemoryTypeFiltering:
-    def test_filter_by_type(self, engine):
-        engine.store(Memory(
-            content="Chose microservices over monolith",
-            memory_type=MemoryType.DECISION,
-        ))
-        engine.store(Memory(
-            content="Port 3000 is already bound by another service",
-            memory_type=MemoryType.ERROR,
-        ))
+    async def test_filter_by_type(self, engine):
+        await engine.store(
+            Memory(
+                content="Chose microservices over monolith",
+                memory_type=MemoryType.DECISION,
+            )
+        )
+        await engine.store(
+            Memory(
+                content="Port 3000 is already bound by another service",
+                memory_type=MemoryType.ERROR,
+            )
+        )
 
-        results = engine.recall("architecture", memory_type="decision")
+        results = await engine.recall("architecture", memory_type="decision")
         for r in results:
             assert r.memory.memory_type == MemoryType.DECISION
 
-    def test_filter_by_tags(self, engine):
-        engine.store(Memory(content="Auth uses JWT", tags=["auth", "jwt"]))
-        engine.store(Memory(content="DB uses Postgres", tags=["database"]))
+    async def test_filter_by_tags(self, engine):
+        await engine.store(Memory(content="Auth uses JWT", tags=["auth", "jwt"]))
+        await engine.store(Memory(content="DB uses Postgres", tags=["database"]))
 
-        results = engine.recall("system", tags=["auth"])
+        results = await engine.recall("system", tags=["auth"])
         for r in results:
             assert "auth" in r.memory.tags
 
 
+@pytest.mark.asyncio
 class TestScoringOrder:
-    def test_higher_importance_scores_higher(self, engine):
-        engine.store(Memory(content="Critical auth decision", importance=0))
-        engine.store(Memory(content="Trivial auth note", importance=4))
+    async def test_higher_importance_scores_higher(self, engine):
+        await engine.store(Memory(content="Critical auth decision", importance=4))
+        await engine.store(Memory(content="Trivial auth note", importance=0))
 
-        results = engine.recall("auth decision")
+        results = await engine.recall("auth decision")
         if len(results) >= 2:
-            assert results[0].memory.importance <= results[1].memory.importance
+            assert results[0].memory.importance >= results[1].memory.importance
 
-    def test_score_breakdown_populated(self, engine):
-        engine.store(Memory(content="Test memory for scoring breakdown"))
-        results = engine.recall("scoring breakdown")
+    async def test_score_breakdown_populated(self, engine):
+        await engine.store(Memory(content="Test memory for scoring breakdown"))
+        results = await engine.recall("scoring breakdown")
         assert len(results) >= 1
         breakdown = results[0].score_breakdown
         assert "vector" in breakdown
@@ -76,20 +84,22 @@ class TestScoringOrder:
         assert "recency" in breakdown
 
 
+@pytest.mark.asyncio
 class TestGraphExpansion:
-    def test_connected_memories_attached(self, engine):
+    async def test_connected_memories_attached(self, engine):
         m1 = Memory(content="Auth uses JWT tokens")
         m2 = Memory(content="JWT tokens expire after 24 hours")
-        stored1 = engine.store(m1)
-        stored2 = engine.store(m2)
+        stored1 = await engine.store(m1)
+        stored2 = await engine.store(m2)
 
         rel = Relationship(
-            source_id=stored1.id, target_id=stored2.id,
+            source_id=stored1.id,
+            target_id=stored2.id,
             rel_type=RelationType.RELATES_TO,
         )
-        engine.db.store_relationship(rel)
+        await engine.db.store_relationship(rel)
 
-        results = engine.recall("JWT authentication")
+        results = await engine.recall("JWT authentication")
         if results:
             top = results[0]
             connected_ids = [c.memory.id for c in top.connected]
@@ -97,45 +107,45 @@ class TestGraphExpansion:
             assert other_id in connected_ids
 
 
+@pytest.mark.asyncio
 class TestSupersedeWarning:
-    def test_superseded_memory_shows_warning(self, engine):
-        """Verify that superseded memories get a WARNING flag in recall results."""
-        old = engine.store(Memory(content="Use MySQL for the database"))
-        new = engine.store(Memory(content="Use PostgreSQL instead of MySQL"))
+    async def test_superseded_memory_shows_warning(self, engine):
+        old = await engine.store(Memory(content="Use MySQL for the database"))
+        new = await engine.store(Memory(content="Use PostgreSQL instead of MySQL"))
 
         rel = Relationship(
-            source_id=new.id, target_id=old.id,
+            source_id=new.id,
+            target_id=old.id,
             rel_type=RelationType.SUPERSEDES,
         )
-        engine.db.store_relationship(rel)
+        await engine.db.store_relationship(rel)
 
-        # Demote old memory like memory_correct does
-        engine.db.update_memory(old.id, importance=4)
+        await engine.db.update_memory(old.id, importance=0)
 
-        results = engine.recall("MySQL database")
+        results = await engine.recall("MySQL database")
         for r in results:
             if r.memory.id == old.id:
-                # The server layer adds the WARNING; search layer attaches connected
                 connected_types = [c.rel_type for c in r.connected]
                 assert "supersedes" in connected_types
 
 
+@pytest.mark.asyncio
 class TestFeedback:
-    def test_positive_feedback_boosts_edges(self, engine):
+    async def test_positive_feedback_boosts_edges(self, engine):
         m1 = Memory(content="Memory A")
         m2 = Memory(content="Memory B")
-        s1 = engine.store(m1)
-        s2 = engine.store(m2)
+        s1 = await engine.store(m1)
+        s2 = await engine.store(m2)
 
         rel = Relationship(source_id=s1.id, target_id=s2.id, strength=0.5)
-        engine.db.store_relationship(rel)
+        await engine.db.store_relationship(rel)
 
-        result = engine.feedback([s1.id], helpful=True)
+        result = await engine.feedback([s1.id], helpful=True)
         assert result["action"] == "reinforced"
 
-    def test_negative_feedback_weakens_edges(self, engine):
+    async def test_negative_feedback_weakens_edges(self, engine):
         m1 = Memory(content="Memory X")
-        s1 = engine.store(m1)
+        s1 = await engine.store(m1)
 
-        result = engine.feedback([s1.id], helpful=False)
+        result = await engine.feedback([s1.id], helpful=False)
         assert result["action"] == "weakened"

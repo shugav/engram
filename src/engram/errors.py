@@ -24,6 +24,5 @@ class EmbeddingConfigMismatchError(EngramError):
         super().__init__(
             f"Embedding model mismatch: project uses '{stored_name}' ({stored_dims}d) "
             f"but current embedder is '{current_name}' ({current_dims}d). "
-            f"To switch models, re-index with memory_reindex (not yet implemented) "
-            f"or start a fresh project database."
+            f"Use a fresh project database or run the v3 migration/reindex path when available."
         )

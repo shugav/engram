@@ -13,6 +13,24 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12"]
 
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: engram
+          POSTGRES_PASSWORD: engram
+          POSTGRES_DB: engram_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U engram -d engram_test"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      ENGRAM_TEST_DATABASE_URL: postgresql://engram:engram@localhost:5432/engram_test
+
     steps:
       - uses: actions/checkout@v4
 
