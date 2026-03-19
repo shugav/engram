@@ -169,6 +169,29 @@ Then configure clients with:
 
 You can also run `setup-remote.sh` to generate this config automatically.
 
+### 7) Multi-machine rule sync
+
+When running Engram across multiple machines (e.g. SSE over Tailscale), cursor rules can auto-sync through Engram itself.
+
+**How it works:** A canonical copy of the Engram cursor rule is stored as a memory in the `global` project with the tag `engram-rule-sync`. Each machine's rule file includes a version check at session start. If the server has a newer version, the agent silently overwrites the local file.
+
+**First-time setup on a new machine** -- paste this into any Cursor chat:
+
+```
+Read the Engram MCP memory using: memory_list(memory_type="pattern", tags="engram-rule-sync", project="global").
+Extract everything below the "---" separator and write it to ~/.cursor/rules/engram-memory.mdc.
+```
+
+**Pushing rule updates:** Edit the rule on your primary machine, bump the `RULE_VERSION` comment at the top, then store the new version:
+
+```
+memory_correct(old_memory_id="<id of current engram-rule-sync memory>",
+               new_content="ENGRAM_RULE_CANONICAL RULE_VERSION:X.Y\n---\n<full rule content>",
+               project="global")
+```
+
+All other machines pick up the change on their next session start.
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -176,8 +199,8 @@ You can also run `setup-remote.sh` to generate this config automatically.
 | `ENGRAM_EMBEDDER` | auto-detect | Embedding provider: `openai`, `ollama`, or `none` |
 | `OPENAI_API_KEY` | (unset) | OpenAI key (only needed if using OpenAI embeddings) |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama server URL (only needed if non-default) |
-| `ENGRAM_PROJECT` | `default` | Project namespace (separate DB file per project) |
-| `ENGRAM_DIR` | `~/.engram/` | Directory where project databases are stored |
+| `ENGRAM_PROJECT` | `default` | Project namespace (column-level isolation) |
+| `DATABASE_URL` | `postgresql://engram:engram@localhost:5432/engram` | Postgres connection string |
 | `ENGRAM_API_KEY` | (unset) | Optional bearer token required for SSE requests |
 
 ## MCP Tools
