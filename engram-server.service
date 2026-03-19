@@ -1,4 +1,4 @@
-# Engram MCP Server -- systemd user service
+# Engram v3 MCP Server -- systemd user service
 #
 # Runs engram in SSE mode so remote editors can connect over the network.
 #
@@ -12,7 +12,7 @@
 #   journalctl --user -u engram-server -f
 
 [Unit]
-Description=Engram MCP Memory Server (SSE)
+Description=Engram v3 MCP Memory Server (SSE + Postgres)
 After=network-online.target
 Wants=network-online.target
 
@@ -23,15 +23,9 @@ ExecStart=%h/engram/.venv/bin/python -m engram --transport sse --port 8788
 Restart=on-failure
 RestartSec=5
 
-# Environment -- edit these or use an EnvironmentFile
 Environment=PYTHONPATH=%h/engram/src
-Environment=ENGRAM_PROJECT=default
-# Set your OpenAI key here or in the EnvironmentFile
-# Environment=OPENAI_API_KEY=sk-...
-# Optional: API key auth for the SSE endpoint
-# Environment=ENGRAM_API_KEY=your-secret-key
 
-# Alternatively, load secrets from a file (recommended)
+# Load DATABASE_URL, OPENAI_API_KEY, etc. from a secrets file (recommended)
 EnvironmentFile=-%h/.config/engram/env
 
 [Install]
