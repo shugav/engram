@@ -106,6 +106,43 @@ class TestMemoryCorrect:
         assert correct_result["status"] == "corrected"
         assert "trivial" in correct_result["old_demoted_to"]
 
+    async def test_correct_shows_warning_on_recall(self, _patch_embedder):
+        """Superseded memories must include WARNING + superseded_by in recall output."""
+        from engram.server import memory_correct, memory_recall, memory_store
+
+        store_result = await memory_store(
+            content="Use MySQL for the database",
+            memory_type="decision",
+            tags="database",
+            project="test-project",
+        )
+        old_id = store_result["id"]
+
+        correct_result = await memory_correct(
+            old_memory_id=old_id,
+            new_content="Use PostgreSQL instead of MySQL for JSONB support",
+            project="test-project",
+        )
+        new_id = correct_result["new_id"]
+
+        # Use min_importance=0 so the demoted (importance=0) memory appears in results
+        recall = await memory_recall(
+            query="MySQL database",
+            min_importance=0,
+            top_k=20,
+            project="test-project",
+        )
+
+        old_entries = [r for r in recall["results"] if r["id"] == old_id]
+        assert old_entries, (
+            f"Superseded memory {old_id} should appear in recall with min_importance=0"
+        )
+        entry = old_entries[0]
+        assert "WARNING" in entry, "Superseded memory should have WARNING field"
+        assert "superseded_by" in entry, "Should include superseded_by reference"
+        assert "THIS MEMORY HAS BEEN SUPERSEDED" in entry["WARNING"]
+        assert entry["superseded_by"]["id"] == new_id
+
     async def test_correct_nonexistent_raises(self, _patch_embedder):
         from engram.server import memory_correct
 

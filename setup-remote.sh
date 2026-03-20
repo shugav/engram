@@ -4,13 +4,12 @@
 # Run this on any machine to point its Cursor at your engram server.
 #
 # Usage:
-#   bash setup-remote.sh                               # defaults: your-server:8788
-#   bash setup-remote.sh other-host                    # custom host
-#   bash setup-remote.sh other-host 9000               # custom host and port
+#   bash setup-remote.sh your-server                   # connect to your-server:8788
+#   bash setup-remote.sh your-server 9000              # custom host and port
 
 set -euo pipefail
 
-ENGRAM_HOST="${1:-your-server}"
+ENGRAM_HOST="${1:?Usage: bash setup-remote.sh <hostname> [port]}"
 ENGRAM_PORT="${2:-8788}"
 ENGRAM_URL="http://${ENGRAM_HOST}:${ENGRAM_PORT}/sse"
 MCP_CONFIG="$HOME/.cursor/mcp.json"

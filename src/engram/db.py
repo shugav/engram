@@ -272,25 +272,65 @@ class MemoryDB:
         query_embedding: Any,
         limit: int,
         conn: AsyncConnection | None = None,
-    ) -> list[tuple[Chunk, float]]:
-        """Return (chunk, cosine_similarity) using pgvector ANN ordering."""
+        include_embedding: bool = False,
+    ) -> list[tuple[Chunk, Memory, float]]:
+        """Return (chunk, memory, cosine_similarity) using pgvector ANN ordering.
+
+        Joins memories in the same query to eliminate N+1 get_memory() calls.
+        Set ``include_embedding=True`` only when you need the raw vector (e.g. auto-connect);
+        skipping it avoids transferring ~6 KB per row.
+        """
+        emb_col = "c.embedding," if include_embedding else ""
+        sql = f"""SELECT
+                       c.id, c.memory_id, c.chunk_text, c.chunk_index,
+                       c.chunk_hash, {emb_col}
+                       m.id AS m_id, m.content AS m_content,
+                       m.memory_type AS m_memory_type, m.project AS m_project,
+                       m.tags AS m_tags, m.importance AS m_importance,
+                       m.access_count AS m_access_count,
+                       m.last_accessed AS m_last_accessed,
+                       m.created_at AS m_created_at,
+                       m.updated_at AS m_updated_at,
+                       (1 - (c.embedding <=> %s::vector)) AS sim
+                   FROM chunks c
+                   JOIN memories m ON m.id = c.memory_id
+                   WHERE m.project = %s AND c.embedding IS NOT NULL
+                   ORDER BY c.embedding <=> %s::vector
+                   LIMIT %s"""
         async with self._acquire(conn) as c:
             async with c.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
-                    """SELECT c.*, (1 - (c.embedding <=> %s::vector)) AS sim
-                       FROM chunks c
-                       JOIN memories m ON m.id = c.memory_id
-                       WHERE m.project = %s AND c.embedding IS NOT NULL
-                       ORDER BY c.embedding <=> %s::vector
-                       LIMIT %s""",
+                    sql,
                     (query_embedding, self.project, query_embedding, limit),
                 )
                 rows = await cur.fetchall()
-                out: list[tuple[Chunk, float]] = []
+                out: list[tuple[Chunk, Memory, float]] = []
                 for r in rows:
                     rowd = dict(r)
                     sim = float(rowd.pop("sim", 0.0))
-                    out.append((self._row_to_chunk(rowd), sim))
+                    chunk_row = {
+                        "id": rowd["id"],
+                        "memory_id": rowd["memory_id"],
+                        "chunk_text": rowd["chunk_text"],
+                        "chunk_index": rowd["chunk_index"],
+                        "chunk_hash": rowd["chunk_hash"],
+                        "embedding": rowd.get("embedding"),
+                    }
+                    memory_row = {
+                        "id": rowd["m_id"],
+                        "content": rowd["m_content"],
+                        "memory_type": rowd["m_memory_type"],
+                        "project": rowd["m_project"],
+                        "tags": rowd["m_tags"],
+                        "importance": rowd["m_importance"],
+                        "access_count": rowd["m_access_count"],
+                        "last_accessed": rowd["m_last_accessed"],
+                        "created_at": rowd["m_created_at"],
+                        "updated_at": rowd["m_updated_at"],
+                    }
+                    chunk = self._row_to_chunk(chunk_row)
+                    memory = self._row_to_memory(memory_row)
+                    out.append((chunk, memory, sim))
                 return out
 
     async def get_all_chunks_with_embeddings(
@@ -529,12 +569,47 @@ class MemoryDB:
                 row = await cur.fetchone()
                 return int(row["c"]) if row else 0
 
+    async def get_graph_score(
+        self,
+        memory_id: str,
+        conn: AsyncConnection | None = None,
+    ) -> float:
+        """Compute a robust graph score (0-1) based on both connection count and strengths.
+
+        Prevents 'gaming' the score by creating many weak connections (e.g. spamming memory_connect with low strength).
+        Uses count_factor * avg_strength so quality connections are rewarded more.
+        """
+        async with self._acquire(conn) as c:
+            async with c.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    """SELECT COUNT(*) AS conn_count,
+                              COALESCE(AVG(strength), 0.0) AS avg_strength
+                       FROM relationships r
+                       WHERE (r.source_id = %s OR r.target_id = %s)
+                       AND EXISTS (SELECT 1 FROM memories m WHERE m.id = r.source_id AND m.project = %s)
+                       AND EXISTS (SELECT 1 FROM memories m2 WHERE m2.id = r.target_id AND m2.project = %s)""",
+                    (memory_id, memory_id, self.project, self.project),
+                )
+                row = await cur.fetchone()
+                if not row or row["conn_count"] == 0:
+                    return 0.0
+                count = int(row["conn_count"])
+                avg_strength = float(row["avg_strength"])
+                count_factor = min(1.0, count / 5.0)
+                return count_factor * avg_strength
+
     async def decay_all_edges(
         self,
-        decay_factor: float = 0.02,
-        min_strength: float = 0.1,
+        decay_factor: float | None = None,
+        min_strength: float | None = None,
         conn: AsyncConnection | None = None,
     ) -> tuple[int, int]:
+        """Decay and prune graph edges. Thresholds default to project_meta values."""
+        if decay_factor is None:
+            decay_factor = await self.get_meta_float("consolidation_decay_factor", 0.02)
+        if min_strength is None:
+            min_strength = await self.get_meta_float("consolidation_min_strength", 0.1)
+
         async with self._acquire(conn) as c:
             async with c.cursor() as cur:
                 await cur.execute(
@@ -557,11 +632,16 @@ class MemoryDB:
 
     async def prune_stale_memories(
         self,
-        max_age_hours: float = 720,
-        max_importance: int = 1,
+        max_age_hours: float | None = None,
+        max_importance: int | None = None,
         conn: AsyncConnection | None = None,
     ) -> int:
         """Prune stale never-accessed memories with importance <= max_importance."""
+        if max_age_hours is None:
+            max_age_hours = await self.get_meta_float("consolidation_max_age_hours", 720.0)
+        if max_importance is None:
+            max_importance = int(await self.get_meta("consolidation_max_importance") or 1)
+
         cutoff = _now_utc() - timedelta(hours=max_age_hours)
         async with self._acquire(conn) as c:
             async with c.cursor() as cur:
@@ -572,6 +652,11 @@ class MemoryDB:
                     (self.project, max_importance, cutoff),
                 )
                 return cur.rowcount or 0
+
+    async def get_meta_float(self, key: str, default: float = 0.0, conn: AsyncConnection | None = None) -> float:
+        """Get meta value as float with default."""
+        val = await self.get_meta(key, conn=conn)
+        return float(val) if val is not None else default
 
     async def delete_relationships_for_memory(
         self,

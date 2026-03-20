@@ -112,7 +112,8 @@ class TestEdgeDecayAndPruning:
             await stress_engine.db.store_relationship(rel)
 
         result = await stress_engine.memify()
-        assert result["edges_decayed"] == 50
+        # >= 50 because auto-connect may add edges between memories with similar content
+        assert result["edges_decayed"] >= 50
 
 
 @pytest.mark.asyncio

@@ -31,7 +31,12 @@ def chunk_text(
     for sentence in sentences:
         slen = len(sentence)
 
-        if current_len + slen > max_chars and current:
+        # Hard break: always emit before exceeding max_chars
+        hard_break = current_len + slen > max_chars and current
+        # Soft break: prefer breaking earlier near paragraph boundaries
+        soft_break = (current_len + slen > max_chars * 0.8 and current
+                      and len(current) > 1 and current_len > max_chars * 0.3)
+        if hard_break or soft_break:
             chunks.append(" ".join(current))
 
             # Build overlap from the tail of the current chunk
@@ -78,6 +83,24 @@ def is_duplicate(new_text: str, existing_texts: list[str], threshold: float = 0.
 
 
 def _split_sentences(text: str) -> list[str]:
-    """Split on sentence-ending punctuation, keeping the delimiter attached."""
-    parts = re.split(r"(?<=[.!?])\s+", text.strip())
-    return [p.strip() for p in parts if p.strip()]
+    """Split text into sentences, respecting paragraph boundaries first.
+
+    This produces cleaner chunks for structured documents by treating paragraph
+    breaks as natural chunk boundaries. First splits on paragraphs (\n\n+),
+    then splits sentences within each paragraph.
+    """
+    if not text.strip():
+        return []
+
+    # Split on paragraph boundaries first (double newlines or more)
+    paragraphs = re.split(r"\n\s*\n", text.strip())
+
+    sentences: list[str] = []
+    for para in paragraphs:
+        if not para.strip():
+            continue
+        # Split sentences within paragraph
+        parts = re.split(r"(?<=[.!?])\s+", para.strip())
+        sentences.extend(p.strip() for p in parts if p.strip())
+
+    return sentences

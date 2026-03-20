@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from datetime import datetime, timezone
 
 from .chunker import chunk_hash, chunk_text, is_duplicate
@@ -38,6 +39,11 @@ WEIGHT_RECENCY_NULL = 0.30
 WEIGHT_GRAPH_NULL = 0.20
 
 DECAY_RATE = 0.01  # per hour
+
+# Auto-connect threshold for semantic similarity (cosine similarity)
+# 0.78 is a good balance: high enough to avoid noise, low enough to catch real relationships
+AUTO_CONNECT_THRESHOLD = float(os.environ.get("ENGRAM_AUTO_CONNECT_THRESHOLD", "0.78"))
+AUTO_CONNECT_MAX = 5  # Max auto-connections per store to avoid over-linking
 
 
 class SearchEngine:
@@ -120,6 +126,13 @@ class SearchEngine:
                 if chunk_objects:
                     await self.db.store_chunks(chunk_objects, conn=conn)
 
+        # Auto-connect semantically similar memories (best-effort, outside main transaction)
+        if chunk_objects and self.has_vectors:
+            try:
+                await self._auto_connect(memory, chunk_objects[0])
+            except Exception:
+                logger.exception("Auto-connect failed (non-fatal) for memory %s", memory.id)
+
         return memory
 
     async def correct_memory(
@@ -190,14 +203,13 @@ class SearchEngine:
         if self.has_vectors:
             query_vec = await self.embedder.embed(query)
             qv = format_vector_literal(query_vec)
-            nearest = await self.db.nearest_chunks_by_embedding(qv, limit=top_k * 2)
+            nearest = await self.db.nearest_chunks_by_embedding(
+                qv, limit=top_k * 2, include_embedding=False,
+            )
             if nearest:
-                max_vec = max(sim for _, sim in nearest) or 1.0
-                for chunk, sim in nearest:
+                max_vec = max(sim for _, _, sim in nearest) or 1.0
+                for chunk, mem, sim in nearest:
                     norm_score = sim / max_vec if max_vec > 0 else 0.0
-                    mem = await self.db.get_memory(chunk.memory_id)
-                    if not mem:
-                        continue
                     cand = candidates.setdefault(mem.id, _Candidate(memory=mem))
                     if norm_score > cand.vector_score:
                         cand.vector_score = norm_score
@@ -219,8 +231,7 @@ class SearchEngine:
             hours = max((now - mem.last_accessed).total_seconds() / 3600, 0.01)
             recency_score = math.exp(-DECAY_RATE * hours)
 
-            conn_count = await self.db.get_connection_count(mem.id)
-            graph_score = min(1.0, conn_count / 5.0)
+            graph_score = await self.db.get_graph_score(mem.id)
 
             composite = (
                 w_vec * cand.vector_score
@@ -286,9 +297,10 @@ class SearchEngine:
         }
 
     async def memify(self) -> dict:
+        """Run consolidation using durable thresholds from project_meta (or defaults)."""
         deduped = await self._dedup_chunks()
-        decayed, pruned_edges = await self.db.decay_all_edges(decay_factor=0.02, min_strength=0.1)
-        pruned_memories = await self.db.prune_stale_memories(max_age_hours=720, max_importance=1)
+        decayed, pruned_edges = await self.db.decay_all_edges()
+        pruned_memories = await self.db.prune_stale_memories()
 
         return {
             "chunks_deduped": deduped,
@@ -312,6 +324,50 @@ class SearchEngine:
         if dup_ids:
             await self.db.delete_chunk_ids(dup_ids)
         return merged
+
+    async def _auto_connect(self, memory: Memory, sample_chunk: Chunk) -> None:
+        """Automatically connect this memory to semantically similar memories.
+
+        Uses vector similarity on the first chunk to find related memories and
+        creates relates_to relationships. This improves graph score for recall.
+        """
+        if not sample_chunk.embedding:
+            return
+
+        qv = format_vector_literal(sample_chunk.embedding)
+        similar = await self.db.nearest_chunks_by_embedding(
+            qv, limit=AUTO_CONNECT_MAX * 3, include_embedding=False,
+        )
+
+        seen_memory_ids: set[str] = set()
+        connected_count = 0
+
+        for chunk, mem, sim in similar:
+            mid = mem.id
+            if mid == memory.id or mid in seen_memory_ids:
+                continue
+
+            if sim < AUTO_CONNECT_THRESHOLD:
+                break  # results are sorted by similarity
+
+            seen_memory_ids.add(mid)
+            rel = Relationship(
+                source_id=memory.id,
+                target_id=mid,
+                rel_type=RelationType.RELATES_TO,
+                strength=round(float(sim), 3),
+            )
+            await self.db.store_relationship(rel)
+            connected_count += 1
+
+            if connected_count >= AUTO_CONNECT_MAX:
+                break
+
+        if connected_count > 0:
+            logger.info(
+                "Auto-connected memory %s to %d similar memories",
+                memory.id[:8], connected_count
+            )
 
 
 class _Candidate:

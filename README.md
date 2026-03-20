@@ -167,11 +167,19 @@ Then configure clients with:
 }
 ```
 
-You can also run `setup-remote.sh` to generate this config automatically.
+You can also run `setup-remote.sh` to generate this config automatically:
+
+```bash
+# Run on any machine to point Cursor at your engram server
+bash setup-remote.sh your-server          # uses default port 8788
+bash setup-remote.sh your-server 9000     # custom port
+```
 
 ### 7) Multi-machine rule sync
 
-When running Engram across multiple machines (e.g. SSE over Tailscale), cursor rules can auto-sync through Engram itself.
+**Source of Truth:** The canonical version lives in the `global` project as a memory tagged `engram-rule-sync` (the memory with the highest `RULE_VERSION` is authoritative). The local `~/.cursor/rules/engram-memory.mdc` is a cached copy that agents should sync from the server on session start. **Never edit the local rule directly** -- update the canonical memory instead (using `memory_correct` with bumped version).
+
+When running Engram across multiple machines (e.g. SSE over Tailscale), cursor rules auto-sync through Engram itself.
 
 **How it works:** A canonical copy of the Engram cursor rule is stored as a memory in the `global` project with the tag `engram-rule-sync`. Each machine's rule file includes a version check at session start. If the server has a newer version, the agent silently overwrites the local file.
 

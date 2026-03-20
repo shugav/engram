@@ -85,6 +85,9 @@ from knowing:
 
 ## Importance Levels (v3)
 
+**Note:** Session handoffs and critical content are auto-bumped from default
+importance. Override only when the auto-assignment is wrong.
+
 - 4 = Critical (identity, must-not-forget decisions)
 - 3 = High (key facts, session handoffs, major decisions)
 - 2 = General (default -- most memories)
@@ -98,10 +101,19 @@ Always add relevant tags. Use short, lowercase, hyphenated tags: \
 
 ## Knowledge Graph
 
+**Note:** The server now auto-connects semantically similar memories on store
+(using vector similarity). You only need to call `memory_connect` for
+relationships the server wouldn't detect (e.g. 'contradicts', 'supersedes',
+causal links).
+
 After storing related memories, use memory_connect to link them. Connected \
 memories surface automatically during recall.
 
 ## Feedback Loop
+
+**Note:** After using recall results in your work, call `memory_feedback` with
+the IDs of results you actually used. This is not optional -- it directly
+controls recall ranking.
 
 After using recall results, call memory_feedback to mark them helpful or not. \
 This trains the graph to surface better results over time.
@@ -126,8 +138,8 @@ fix it immediately without being asked.
 
 ## Maintenance
 
-Run memory_consolidate periodically to deduplicate, decay unused edges, and \
-prune stale memories.
+Run memory_consolidate periodically (every ~50 stores, or at session end) to \
+deduplicate, decay unused edges, and prune stale memories.
 
 ## Onboarding New Projects
 
@@ -224,6 +236,18 @@ async def memory_store(
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
     importance = max(0, min(4, importance))
 
+    # Auto-adjust importance for known critical patterns when default is used.
+    # Only triggers on unambiguous markers that agents deliberately include.
+    auto_adjusted = False
+    if importance == 2:  # only override default
+        upper = content.upper()
+        if "SESSION HANDOFF" in upper or "SESSION-HANDOFF" in upper:
+            importance = 3
+            auto_adjusted = True
+        elif "MUST NOT FORGET" in upper or "BREAKING CHANGE" in upper:
+            importance = 3
+            auto_adjusted = True
+
     memory = Memory(
         content=content,
         memory_type=mt,
@@ -242,6 +266,7 @@ async def memory_store(
         "memory_type": stored.memory_type.value,
         "tags": stored.tags,
         "importance": stored.importance,
+        "auto_adjusted": auto_adjusted,
     }
 
 
@@ -259,6 +284,9 @@ async def memory_recall(
 
     Results are ranked by a composite score:
       Final = (vector * 0.45 + BM25 * 0.25 + recency * 0.15 + graph * 0.15) * importance_multiplier
+
+    Graph score uses `count_factor * avg_strength` so high-quality connections
+    are rewarded more than many weak ones.
 
     Connected memories from the knowledge graph are attached automatically.
 
@@ -330,7 +358,16 @@ async def memory_recall(
 
         output.append(entry)
 
-    return {"results": output, "count": len(output)}
+    # Add feedback hints to encourage graph quality maintenance
+    hints = []
+    if output:
+        result_ids = ",".join(r["id"] for r in output[:3])
+        hints.append(
+            f"Call memory_feedback(memory_ids='{result_ids}', helpful=true/false) "
+            "to improve future recall ranking."
+        )
+
+    return {"results": output, "count": len(output), "hints": hints}
 
 
 @mcp.tool()
@@ -396,6 +433,7 @@ async def memory_list(
     tags: str = "",
     min_importance: int = 0,
     limit: int = 20,
+    offset: int = 0,
     project: str = "",
 ) -> dict:
     """List recent memories with optional filters.
@@ -405,6 +443,7 @@ async def memory_list(
         tags: Comma-separated tags to filter by. Empty = all.
         min_importance: Minimum importance floor (0=all). Higher = stricter.
         limit: Max number of memories to return.
+        offset: Number of memories to skip (for pagination).
         project: Project namespace (e.g. "my-app"). Empty = "default".
 
     Returns:
@@ -430,6 +469,7 @@ async def memory_list(
         tags=tag_list,
         min_importance=mi,
         limit=limit,
+        offset=offset,
     )
 
     return {
@@ -596,9 +636,11 @@ async def memory_consolidate(project: str = "") -> dict:
     Three stages:
     1. Deduplicates chunks by hash to remove exact duplicates.
     2. Applies temporal decay to all graph edges and prunes weak connections
-       (strength < 0.1) -- edges that are never reinforced by feedback fade away.
-    3. Prunes stale, never-accessed, low-importance memories older than 30 days.
+       (strength below threshold) -- edges never reinforced by feedback fade away.
+    3. Prunes stale, never-accessed, low-importance memories past the age threshold.
 
+    Thresholds (decay factor, min strength, max age) are stored durably in the
+    ``project_meta`` table and can be customized per-project.
     Frequently-used connections survive and strengthen. Unused ones decay.
     Run this periodically to keep the memory system healthy and focused.
 
