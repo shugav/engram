@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "engram"
-version = "3.1.0"
+version = "3.2.0"
 description = "Persistent three-layer memory for AI agents, exposed as an MCP server."
 readme = "README.md"
 license = "MIT"

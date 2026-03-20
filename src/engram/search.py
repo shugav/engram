@@ -42,7 +42,7 @@ DECAY_RATE = 0.01  # per hour
 
 # Auto-connect threshold for semantic similarity (cosine similarity)
 # 0.78 is a good balance: high enough to avoid noise, low enough to catch real relationships
-AUTO_CONNECT_THRESHOLD = float(os.environ.get("ENGRAM_AUTO_CONNECT_THRESHOLD", "0.78"))
+AUTO_CONNECT_THRESHOLD = float(os.environ.get("ENGRAM_AUTO_CONNECT_THRESHOLD", "0.65"))
 AUTO_CONNECT_MAX = 5  # Max auto-connections per store to avoid over-linking
 
 

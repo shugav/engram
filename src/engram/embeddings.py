@@ -102,18 +102,25 @@ class OpenAIEmbedder:
 
 
 class OllamaEmbedder:
-    """Ollama nomic-embed-text via local REST API (768 dimensions).
+    """Ollama embedding via local REST API.
 
     Calls Ollama's /api/embed endpoint directly with httpx -- no ollama
-    Python package needed.
+    Python package needed.  Model and dimensions are configurable; defaults
+    to nomic-embed-text (768 dims) for backward compatibility.
     """
 
-    name = "ollama/nomic-embed-text"
-    dimensions = 768
     version = "v1.5"
 
-    def __init__(self, base_url: str = "http://localhost:11434"):
+    def __init__(
+        self,
+        base_url: str = "http://localhost:11434",
+        model: str = "nomic-embed-text",
+        dimensions: int = 768,
+    ):
         self._base_url = validate_ollama_base_url(base_url).rstrip("/")
+        self._model = model
+        self.name = f"ollama/{model}"
+        self.dimensions = dimensions
 
     async def embed(self, text: str) -> np.ndarray:
         import httpx
@@ -121,7 +128,7 @@ class OllamaEmbedder:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 f"{self._base_url}/api/embed",
-                json={"model": "nomic-embed-text", "input": text},
+                json={"model": self._model, "input": text},
             )
             resp.raise_for_status()
             data = resp.json()
@@ -136,7 +143,7 @@ class OllamaEmbedder:
                 batch = list(texts[i : i + batch_size])
                 resp = await client.post(
                     f"{self._base_url}/api/embed",
-                    json={"model": "nomic-embed-text", "input": batch},
+                    json={"model": self._model, "input": batch},
                 )
                 resp.raise_for_status()
                 data = resp.json()

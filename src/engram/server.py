@@ -10,6 +10,8 @@ from collections import OrderedDict
 
 from mcp.server.fastmcp import FastMCP
 
+from pydantic import ValidationError
+
 from .db import MemoryDB
 from .embeddings import create_embedder
 from .errors import EmbeddingConfigMismatchError
@@ -22,6 +24,9 @@ from .types import (
     RelationType,
 )
 from .util import normalize_project
+
+MAX_LIMIT = 100
+MAX_CONNECTED = 10
 
 logger = logging.getLogger("engram")
 _MAX_ENGINE_CACHE = 50
@@ -248,12 +253,15 @@ async def memory_store(
             importance = 3
             auto_adjusted = True
 
-    memory = Memory(
-        content=content,
-        memory_type=mt,
-        tags=tag_list,
-        importance=importance,
-    )
+    try:
+        memory = Memory(
+            content=content,
+            memory_type=mt,
+            tags=tag_list,
+            importance=importance,
+        )
+    except ValidationError as e:
+        raise ValueError(f"Invalid memory content: {e.errors()[0]['msg']}") from e
 
     try:
         stored = await engine.store(memory)
@@ -303,6 +311,7 @@ async def memory_recall(
     Returns:
         Ranked list of memories with scores, matched chunks, and connected context.
     """
+    top_k = max(1, min(MAX_LIMIT, top_k))
     logger.info("memory_recall project=%s top_k=%s", normalize_project(project), top_k)
     engine = await _get_engine(project or None)
 
@@ -348,7 +357,7 @@ async def memory_recall(
                     "direction": c.direction,
                     "strength": c.strength,
                 }
-                for c in r.connected
+                for c in r.connected[:MAX_CONNECTED]
             ],
         }
 
@@ -449,6 +458,8 @@ async def memory_list(
     Returns:
         List of memories sorted by most recently updated.
     """
+    limit = max(1, min(MAX_LIMIT, limit))
+    offset = max(0, offset)
     logger.info("memory_list project=%s", normalize_project(project))
     engine = await _get_engine(project or None)
 

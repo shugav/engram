@@ -30,6 +30,10 @@ venv/
 *.swp
 *.swo
 
+# Stress test artifacts
+tests/stress_data/
+tests/stress_report.md
+
 # OS
 .DS_Store
 Thumbs.db
