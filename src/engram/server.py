@@ -686,16 +686,43 @@ async def onboarding(project: str = "") -> str:
     return header + bootstrap + workflow + types_and_tips
 
 
-def _wrap_with_api_key_auth(app, api_key: str):
-    """ASGI middleware that rejects requests missing a valid Bearer token.
+class _RateLimiter:
+    """Simple in-memory per-IP rate limiter for SSE mode."""
 
-    Uses constant-time comparison to prevent timing side-channel attacks.
+    def __init__(self, max_requests: int = 120, window_seconds: int = 60):
+        self._max = max_requests
+        self._window = window_seconds
+        self._hits: dict[str, list[float]] = {}
+
+    def is_allowed(self, ip: str) -> bool:
+        import time
+
+        now = time.monotonic()
+        cutoff = now - self._window
+        hits = self._hits.get(ip, [])
+        hits = [t for t in hits if t > cutoff]
+        if len(hits) >= self._max:
+            self._hits[ip] = hits
+            return False
+        hits.append(now)
+        self._hits[ip] = hits
+        return True
+
+
+def _wrap_with_api_key_auth(app, api_key: str, rate_limit: int = 120):
+    """ASGI middleware with constant-time auth and per-IP rate limiting.
+
+    Args:
+        app: The ASGI application to wrap.
+        api_key: Expected Bearer token value.
+        rate_limit: Max requests per IP per minute (0 to disable).
     """
     import secrets
 
     from starlette.responses import JSONResponse
 
     expected = f"Bearer {api_key}".encode("utf-8")
+    limiter = _RateLimiter(max_requests=rate_limit) if rate_limit > 0 else None
 
     async def auth_middleware(scope, receive, send):
         stype = scope["type"]
@@ -708,6 +735,17 @@ def _wrap_with_api_key_auth(app, api_key: str):
             resp = PlainTextResponse("Forbidden", status_code=403)
             await resp(scope, receive, send)
             return
+
+        if limiter:
+            client = scope.get("client")
+            client_ip = client[0] if client else "unknown"
+            if not limiter.is_allowed(client_ip):
+                resp = JSONResponse(
+                    {"error": "rate limit exceeded"}, status_code=429
+                )
+                await resp(scope, receive, send)
+                return
+
         headers = dict(scope.get("headers", []))
         token = headers.get(b"authorization", b"")
         if not secrets.compare_digest(token, expected):
